@@ -1,0 +1,133 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  DOCKER_IMAGE: gouravmuleva/elsargo
+  HELM_REPO: gmuleva/els-argo1
+  HELM_VALUES_PATH: helm/values.yaml
+
+jobs:
+  build-test-push:
+    name: Build, Test & Push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # required for semantic-release
+          persist-credentials: false
+
+      # ── Python setup & Unit Tests ─────────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run unit tests
+        run: |
+          pytest tests/ -v --cov=src --cov-report=xml --cov-report=term-missing
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+      # ── Semantic Release → determine new version ──────────────────────────
+      - name: Setup Node.js (for semantic-release)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install semantic-release
+        run: |
+          npm install -g \
+            semantic-release \
+            @semantic-release/commit-analyzer \
+            @semantic-release/release-notes-generator \
+            @semantic-release/github
+
+      - name: Run semantic-release (dry-run to get version)
+        id: semrel
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Capture the next version without publishing yet
+          NEXT_VERSION=$(npx semantic-release --dry-run --no-ci 2>&1 \
+            | grep "The next release version is" \
+            | sed -E 's/.*The next release version is ([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+
+          if [ -z "$NEXT_VERSION" ]; then
+            echo "No new release needed (no relevant commits). Using existing tag."
+            NEXT_VERSION=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "1.0.1")
+            echo "new_release=false" >> $GITHUB_OUTPUT
+          else
+            echo "new_release=true" >> $GITHUB_OUTPUT
+          fi
+
+          echo "version=$NEXT_VERSION" >> $GITHUB_OUTPUT
+          echo "🚀 Next version: $NEXT_VERSION"
+
+      # ── Docker Build & Push ────────────────────────────────────────────────
+      - name: Log in to Docker Hub
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ env.DOCKER_IMAGE }}:${{ steps.semrel.outputs.version }} \
+                       -t ${{ env.DOCKER_IMAGE }}:latest .
+
+      - name: Push Docker image
+        if: github.ref == 'refs/heads/main'
+        run: |
+          docker push ${{ env.DOCKER_IMAGE }}:${{ steps.semrel.outputs.version }}
+          docker push ${{ env.DOCKER_IMAGE }}:latest
+
+      # ── Publish GitHub Release (actual) ──────────────────────────────────
+      - name: Publish Release
+        if: github.ref == 'refs/heads/main' && steps.semrel.outputs.new_release == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx semantic-release
+
+      # ── Update Helm values.yaml in els-argo1 ─────────────────────────────
+      - name: Update Helm values.yaml with new tag
+        if: github.ref == 'refs/heads/main' && steps.semrel.outputs.new_release == 'true'
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          NEW_TAG: ${{ steps.semrel.outputs.version }}
+        run: |
+          git config --global user.email "ci-bot@github.com"
+          git config --global user.name "CI Bot"
+
+          # Clone the helm repo
+          git clone https://x-access-token:${GH_PAT}@github.com/${{ env.HELM_REPO }}.git helm-repo
+          cd helm-repo
+
+          # Update the tag in values.yaml using sed
+          sed -i "s/  tag: \".*\"/  tag: \"${NEW_TAG}\"/" ${{ env.HELM_VALUES_PATH }}
+
+          # Verify the change
+          echo "Updated values.yaml:"
+          grep -A2 "repository:" ${{ env.HELM_VALUES_PATH }}
+
+          # Commit and push
+          git add ${{ env.HELM_VALUES_PATH }}
+          git commit -m "ci: update image tag to ${NEW_TAG} [skip ci]"
+          git push origin main
+
+          echo "✅ Helm values.yaml updated with tag: ${NEW_TAG}"
