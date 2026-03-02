@@ -20,8 +20,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          persist-credentials: false
+          fetch-depth: 0 # required for semantic-release to read full tag history
 
       # ── Python setup & Unit Tests ─────────────────────────────────────────
       - name: Set up Python
@@ -62,7 +61,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          OUTPUT=$(npx semantic-release --dry-run 2>&1)
+          # || true ensures a non-zero exit from semantic-release never kills the pipeline
+          OUTPUT=$(npx semantic-release --dry-run 2>&1) || true
           echo "$OUTPUT"
 
           NEXT_VERSION=$(echo "$OUTPUT" | grep -oP 'The next release version is \K[0-9]+\.[0-9]+\.[0-9]+' || true)
@@ -132,18 +132,14 @@ jobs:
           git config --global user.email "ci-bot@github.com"
           git config --global user.name "CI Bot"
 
-          # Clone the helm repo
           git clone https://x-access-token:${GH_PAT}@github.com/${{ env.HELM_REPO }}.git helm-repo
           cd helm-repo
 
-          # Update the tag in values.yaml
           sed -i "s/  tag: \".*\"/  tag: \"${NEW_TAG}\"/" ${{ env.HELM_VALUES_PATH }}
 
-          # Verify the change
           echo "Updated values.yaml:"
           grep -A2 "repository:" ${{ env.HELM_VALUES_PATH }}
 
-          # Commit and push
           git add ${{ env.HELM_VALUES_PATH }}
           git commit -m "ci: update image tag to ${NEW_TAG} [skip ci]"
           git push origin main
