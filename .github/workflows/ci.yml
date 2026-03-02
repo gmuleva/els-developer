@@ -15,12 +15,16 @@ jobs:
   build-test-push:
     name: Build, Test & Push
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # required for semantic-release to push tags
+      issues: write
+      pull-requests: write
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # required for semantic-release to read full tag history
+          fetch-depth: 0
 
       # ── Python setup & Unit Tests ─────────────────────────────────────────
       - name: Set up Python
@@ -61,7 +65,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # || true ensures a non-zero exit from semantic-release never kills the pipeline
           OUTPUT=$(npx semantic-release --dry-run 2>&1) || true
           echo "$OUTPUT"
 
@@ -69,7 +72,12 @@ jobs:
 
           if [ -z "$NEXT_VERSION" ]; then
             echo "⚠️ No new version from semantic-release. Falling back to latest git tag."
-            NEXT_VERSION=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "1.0.1")
+            NEXT_VERSION=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')
+            # If still empty (no tags at all), use default
+            if [ -z "$NEXT_VERSION" ]; then
+              NEXT_VERSION="1.0.1"
+              echo "ℹ️ No tags found. Using default version: $NEXT_VERSION"
+            fi
             echo "new_release=false" >> $GITHUB_OUTPUT
           else
             echo "✅ New version detected: $NEXT_VERSION"
