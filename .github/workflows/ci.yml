@@ -20,7 +20,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0          # required for semantic-release
+          fetch-depth: 0
           persist-credentials: false
 
       # ── Python setup & Unit Tests ─────────────────────────────────────────
@@ -62,23 +62,37 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Capture the next version without publishing yet
-          NEXT_VERSION=$(npx semantic-release --dry-run --no-ci 2>&1 \
-            | grep "The next release version is" \
-            | sed -E 's/.*The next release version is ([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+          OUTPUT=$(npx semantic-release --dry-run 2>&1)
+          echo "$OUTPUT"
+
+          NEXT_VERSION=$(echo "$OUTPUT" | grep -oP 'The next release version is \K[0-9]+\.[0-9]+\.[0-9]+' || true)
 
           if [ -z "$NEXT_VERSION" ]; then
-            echo "No new release needed (no relevant commits). Using existing tag."
+            echo "⚠️ No new version from semantic-release. Falling back to latest git tag."
             NEXT_VERSION=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "1.0.1")
             echo "new_release=false" >> $GITHUB_OUTPUT
           else
+            echo "✅ New version detected: $NEXT_VERSION"
             echo "new_release=true" >> $GITHUB_OUTPUT
           fi
 
           echo "version=$NEXT_VERSION" >> $GITHUB_OUTPUT
-          echo "🚀 Next version: $NEXT_VERSION"
+          echo "🚀 Version to use: $NEXT_VERSION"
 
-      # ── Docker Build & Push ────────────────────────────────────────────────
+      - name: Debug version output
+        run: |
+          echo "Version     = '${{ steps.semrel.outputs.version }}'"
+          echo "New release = '${{ steps.semrel.outputs.new_release }}'"
+
+      - name: Validate version is not empty
+        run: |
+          if [ -z "${{ steps.semrel.outputs.version }}" ]; then
+            echo "❌ Version is empty! Cannot build Docker image."
+            exit 1
+          fi
+          echo "✅ Version is valid: ${{ steps.semrel.outputs.version }}"
+
+      # ── Docker Build & Push ───────────────────────────────────────────────
       - name: Log in to Docker Hub
         if: github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
@@ -88,13 +102,17 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build -t ${{ env.DOCKER_IMAGE }}:${{ steps.semrel.outputs.version }} \
-                       -t ${{ env.DOCKER_IMAGE }}:latest .
+          VERSION=${{ steps.semrel.outputs.version }}
+          echo "Building image: ${{ env.DOCKER_IMAGE }}:${VERSION}"
+          docker build \
+            -t ${{ env.DOCKER_IMAGE }}:${VERSION} \
+            -t ${{ env.DOCKER_IMAGE }}:latest .
 
       - name: Push Docker image
         if: github.ref == 'refs/heads/main'
         run: |
-          docker push ${{ env.DOCKER_IMAGE }}:${{ steps.semrel.outputs.version }}
+          VERSION=${{ steps.semrel.outputs.version }}
+          docker push ${{ env.DOCKER_IMAGE }}:${VERSION}
           docker push ${{ env.DOCKER_IMAGE }}:latest
 
       # ── Publish GitHub Release (actual) ──────────────────────────────────
@@ -118,7 +136,7 @@ jobs:
           git clone https://x-access-token:${GH_PAT}@github.com/${{ env.HELM_REPO }}.git helm-repo
           cd helm-repo
 
-          # Update the tag in values.yaml using sed
+          # Update the tag in values.yaml
           sed -i "s/  tag: \".*\"/  tag: \"${NEW_TAG}\"/" ${{ env.HELM_VALUES_PATH }}
 
           # Verify the change
